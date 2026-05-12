@@ -13,21 +13,28 @@ import type { HealthReport } from "./health.js";
 // Types
 // ---------------------------------------------------------------------------
 
-interface HealResponse {
-  sessionId: string;
-  apiKey?: string;
-  decision: "healed" | "escalate" | "more_repairs";
+interface HealingDecision {
+  decision: "healed" | "escalate" | "more_repairs" | "recheck_health";
   narrative: string;
-  severity?: string;
-  commands?: Array<{
+  commands: Array<{
     action: string;
     description: string;
     whitelisted: boolean;
   }>;
-  summary?: string;
-  repairsExecuted?: number;
-  turnsUsed?: number;
-  recommendations?: string[];
+  confidence: number;
+  severity: string;
+}
+
+interface InitialHealResponse {
+  apiKey?: string;
+  agentId: string;
+  sessionId: string;
+  diagnosis: unknown;
+  decision: HealingDecision;
+}
+
+interface ResultsResponse {
+  decision: HealingDecision;
 }
 
 interface RepairExecResult {
@@ -214,13 +221,17 @@ async function main(): Promise<void> {
       );
     }
 
-    let response: HealResponse;
+    let decision: HealingDecision;
     try {
-      const endpoint = turnCount === 1
-        ? `${url}/api/v1/heal`
-        : `${url}/api/v1/heal/results`;
-
-      response = await postJSON(endpoint, requestBody, apiKey);
+      if (turnCount === 1) {
+        const resp: InitialHealResponse = await postJSON(`${url}/api/v1/heal`, requestBody, apiKey);
+        if (resp.apiKey && !apiKey) apiKey = resp.apiKey;
+        if (resp.sessionId) sessionId = resp.sessionId;
+        decision = resp.decision;
+      } else {
+        const resp: ResultsResponse = await postJSON(`${url}/api/v1/heal/results`, requestBody, apiKey);
+        decision = resp.decision;
+      }
     } catch (err: any) {
       if (json) {
         console.log(JSON.stringify({ error: "server_request_failed", turn: turnCount, message: err.message }));
@@ -233,49 +244,41 @@ async function main(): Promise<void> {
       process.exit(1);
     }
 
-    // Store apiKey from first response for subsequent calls
-    if (response.apiKey && !apiKey) {
-      apiKey = response.apiKey;
-    }
-    if (response.sessionId) {
-      sessionId = response.sessionId;
-    }
-
     // Handle decision
-    if (response.decision === "healed") {
+    if (decision.decision === "healed") {
       if (json) {
         console.log(JSON.stringify({
           decision: "healed",
           sessionId,
-          narrative: response.narrative,
-          summary: response.summary,
-          repairsExecuted: response.repairsExecuted ?? 0,
-          turnsUsed: response.turnsUsed ?? turnCount,
+          narrative: decision.narrative,
+          confidence: decision.confidence,
+          turnsUsed: turnCount,
         }));
       } else {
-        logDoctor(response.narrative || response.summary || "Agent is healthy.");
+        logDoctor(decision.narrative || "Agent is healthy.");
         log("");
-        log(`Healing complete: ${response.repairsExecuted ?? 0} repairs in ${response.turnsUsed ?? turnCount} turns`);
+        log(`Healing complete in ${turnCount} turn(s).`);
       }
       return;
     }
 
-    if (response.decision === "escalate") {
+    if (decision.decision === "escalate") {
       if (json) {
         console.log(JSON.stringify({
           decision: "escalate",
           sessionId,
-          narrative: response.narrative,
-          summary: response.summary,
-          recommendations: response.recommendations,
+          narrative: decision.narrative,
+          commands: decision.commands,
         }));
       } else {
-        logDoctor(response.narrative || response.summary || "Escalation required.", "critical");
-        if (response.recommendations && response.recommendations.length > 0) {
+        logDoctor(decision.narrative || "Escalation required.", "critical");
+        const manualCmds = decision.commands?.filter((c) => !c.whitelisted) || [];
+        if (manualCmds.length > 0) {
           log("");
           log("Recommendations:");
-          for (const r of response.recommendations) {
-            log(`  - ${r}`);
+          for (const cmd of manualCmds) {
+            log(`  $ ${cmd.action}`);
+            log(`    ${cmd.description}`);
           }
         }
         log("");
@@ -284,13 +287,13 @@ async function main(): Promise<void> {
       process.exit(1);
     }
 
-    if (response.decision === "more_repairs") {
-      const commands = response.commands || [];
+    if (decision.decision === "more_repairs" || decision.decision === "recheck_health") {
+      const commands = decision.commands || [];
       const whitelisted = commands.filter((c) => c.whitelisted);
       const manual = commands.filter((c) => !c.whitelisted);
 
       if (!json) {
-        logDoctor(response.narrative || "Repairs prescribed.", response.severity);
+        logDoctor(decision.narrative || "Repairs prescribed.", decision.severity);
       }
 
       if (whitelisted.length === 0 && manual.length === 0) {
@@ -333,7 +336,7 @@ async function main(): Promise<void> {
           console.log(JSON.stringify({
             decision: "more_repairs",
             sessionId,
-            narrative: response.narrative,
+            narrative: decision.narrative,
             manualCommands: manual,
           }));
         } else {
@@ -366,9 +369,9 @@ async function main(): Promise<void> {
 
     // Unknown decision
     if (json) {
-      console.log(JSON.stringify({ error: "unknown_decision", decision: (response as any).decision, response }));
+      console.log(JSON.stringify({ error: "unknown_decision", decision: decision.decision }));
     } else {
-      log(`Unexpected decision from hospital: ${(response as any).decision}`);
+      log(`Unexpected decision from hospital: ${decision.decision}`);
     }
     break;
   }
