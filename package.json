@@ -1,0 +1,24 @@
+{
+  "name": "@agent-hospital/client",
+  "version": "0.1.0",
+  "description": "Zero-config health check and healing client for Agent Hospital",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "agent-hospital-client": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": ["agent-hospital", "ai-agent", "health-check", "openclaw", "hermes"],
+  "license": "MIT",
+  "files": ["dist"],
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "@types/node": "^20.0.0"
+  }
+}
