@@ -1308,13 +1308,45 @@ function readHermesConfig(): any {
 }
 
 function findHermesPid(): number | null {
+  // 1. Check PID file
   const pidFile = path.join(HERMES_DIR, "gateway.pid");
   try {
     const pid = parseInt(fs.readFileSync(pidFile, "utf-8").trim(), 10);
     if (!isNaN(pid)) {
-      try { process.kill(pid, 0); return pid; } catch { return null; }
+      try { process.kill(pid, 0); return pid; } catch {}
     }
   } catch {}
+
+  // 2. Check /tmp/hermes.pid (some versions write here)
+  try {
+    const pid = parseInt(fs.readFileSync("/tmp/hermes.pid", "utf-8").trim(), 10);
+    if (!isNaN(pid)) {
+      try { process.kill(pid, 0); return pid; } catch {}
+    }
+  } catch {}
+
+  // 3. Fallback: pgrep for hermes process
+  try {
+    const out = execSync("pgrep -f 'hermes' 2>/dev/null || pgrep -f 'hermes-agent' 2>/dev/null", {
+      encoding: "utf-8",
+      timeout: 5000,
+    }).trim();
+    const pids = out.split("\n").map((l) => parseInt(l.trim(), 10)).filter((n) => !isNaN(n) && n !== process.pid);
+    if (pids.length > 0) return pids[0];
+  } catch {}
+
+  // 4. Fallback: check pm2 for hermes process
+  try {
+    const pm2Out = execSync("pm2 jlist 2>/dev/null", { encoding: "utf-8", timeout: 5000 });
+    const pm2List = JSON.parse(pm2Out);
+    for (const proc of pm2List) {
+      const name = (proc.name || "").toLowerCase();
+      if ((name.includes("hermes")) && proc.pm2_env?.status === "online") {
+        return proc.pid || null;
+      }
+    }
+  } catch {}
+
   return null;
 }
 
