@@ -105,18 +105,36 @@ async function postJSON(url: string, body: unknown, apiKey?: string): Promise<an
     headers["x-api-key"] = apiKey;
   }
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
-  });
+  const jsonBody = JSON.stringify(body);
 
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`HTTP ${res.status}: ${text.slice(0, 500)}`);
+  // Follow redirects manually for POST (some runtimes drop body on redirect)
+  let currentUrl = url;
+  for (let i = 0; i < 3; i++) {
+    const res = await fetch(currentUrl, {
+      method: "POST",
+      headers,
+      body: jsonBody,
+      redirect: "manual",
+    });
+
+    // Follow 3xx redirects preserving POST + body
+    if (res.status >= 300 && res.status < 400) {
+      const location = res.headers.get("location");
+      if (location) {
+        currentUrl = location.startsWith("http") ? location : new URL(location, currentUrl).href;
+        continue;
+      }
+    }
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`HTTP ${res.status}: ${text.slice(0, 500)}`);
+    }
+
+    return res.json();
   }
 
-  return res.json();
+  throw new Error("Too many redirects");
 }
 
 // ---------------------------------------------------------------------------
