@@ -11,20 +11,30 @@ const OPENCLAW_DIR = path.join(os.homedir(), ".openclaw");
 // Whitelisted action maps
 // ---------------------------------------------------------------------------
 
+// Actions safe to auto-execute (non-destructive, won't kill the running agent)
 const HERMES_ACTIONS: Record<string, string> = {
-  "restart-gateway": "pkill -f 'hermes.*gateway' || true && hermes gateway start",
   "prune-sessions": `find ${HERMES_DIR}/sessions -name '*.json' -mtime +30 -delete 2>/dev/null || true`,
   "checkpoint-wal": `sqlite3 ${HERMES_DIR}/state.db 'PRAGMA wal_checkpoint(TRUNCATE);' 2>/dev/null || true`,
-  "kill-port-conflict": "lsof -ti:8642 | xargs kill -9 2>/dev/null || true",
   "clean-logs": `find ${HERMES_DIR}/logs -name '*.log' -mtime +7 -delete 2>/dev/null || true`,
 };
 
 const OPENCLAW_ACTIONS: Record<string, string> = {
-  "restart-daemon": "pkill -f 'openclaw.*daemon' || true && openclaw daemon start",
   "prune-sessions": `find ${OPENCLAW_DIR} -name '*.jsonl' -mtime +30 -delete 2>/dev/null || true`,
-  "kill-port-conflict": "lsof -ti:18789 | xargs kill -9 2>/dev/null || true",
   "clean-logs": `find ${OPENCLAW_DIR}/logs -name '*.log' -mtime +7 -delete 2>/dev/null || true`,
   "fix-context-window": `find ${OPENCLAW_DIR} -name '*.jsonl' -size +50M -exec truncate -s 0 {} \\; 2>/dev/null || true`,
+};
+
+// Actions that require manual execution -- killing processes can take down the
+// agent that is running the heal client, so these are never auto-executed.
+export const MANUAL_ONLY_ACTIONS: Record<string, Record<string, string>> = {
+  hermes: {
+    "restart-gateway": "pkill -f 'hermes.*gateway' || true && hermes gateway start",
+    "kill-port-conflict": "lsof -ti:8642 | xargs kill -9 2>/dev/null || true",
+  },
+  openclaw: {
+    "restart-daemon": "pkill -f 'openclaw.*daemon' || true && openclaw daemon start",
+    "kill-port-conflict": "lsof -ti:18789 | xargs kill -9 2>/dev/null || true",
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -33,15 +43,31 @@ const OPENCLAW_ACTIONS: Record<string, string> = {
 
 export function listRepairActions(framework: Framework): string[] {
   const actions = framework === "hermes" ? HERMES_ACTIONS : OPENCLAW_ACTIONS;
-  return Object.keys(actions);
+  const manual = MANUAL_ONLY_ACTIONS[framework] || {};
+  return [...Object.keys(actions), ...Object.keys(manual)];
 }
 
 export function getActionCommand(action: string, framework: Framework): string | null {
   const actions = framework === "hermes" ? HERMES_ACTIONS : OPENCLAW_ACTIONS;
-  return actions[action] || null;
+  if (actions[action]) return actions[action];
+  const manual = MANUAL_ONLY_ACTIONS[framework] || {};
+  return manual[action] || null;
+}
+
+export function isManualOnly(action: string, framework: Framework): boolean {
+  const manual = MANUAL_ONLY_ACTIONS[framework] || {};
+  return action in manual;
 }
 
 export function executeRepair(action: string, framework: Framework): { success: boolean; output: string } {
+  if (isManualOnly(action, framework)) {
+    const cmd = getActionCommand(action, framework);
+    return {
+      success: false,
+      output: `MANUAL ONLY: "${action}" kills running processes and cannot be auto-executed (would terminate this heal session). Run manually: ${cmd}`,
+    };
+  }
+
   const command = getActionCommand(action, framework);
   if (!command) {
     return { success: false, output: `Unknown action: ${action}` };
