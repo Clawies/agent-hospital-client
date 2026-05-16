@@ -217,7 +217,7 @@ async function main(): Promise<void> {
   let apiKey: string | undefined;
   let sessionId: string | undefined;
   let turnCount = 0;
-  const MAX_TURNS = 6;
+  const MAX_TURNS = 10;
 
   // Initial request payload
   let requestBody: any = {
@@ -349,20 +349,17 @@ async function main(): Promise<void> {
           logRecommendations(commands);
         }
       } else {
-        // Only manual recommendations, no auto-executable repairs
-        if (json) {
-          console.log(JSON.stringify({
-            decision: "more_repairs",
-            sessionId,
-            narrative: decision.narrative,
-            manualCommands: manual,
-          }));
-        } else {
+        // Only manual recommendations -- report as skipped and continue loop
+        if (!json) {
           logRecommendations(commands);
-          log("");
-          log("No auto-executable repairs. Run the recommendations above manually.");
         }
-        return;
+        for (const cmd of manual) {
+          results.push({
+            action: cmd.action,
+            success: false,
+            output: `Skipped: manual-only action (cannot auto-execute)`,
+          });
+        }
       }
 
       // Collect post-repair health if any repair succeeded
