@@ -12,6 +12,8 @@ import type { Framework } from "./detect.js";
 const SKIP_DIRS = new Set([
   ".git", ".next", "node_modules", "briefings", "__pycache__",
   ".cache", "dist", "build",
+  "venv", ".venv", "env", "site-packages", "image-cache",
+  "reference-projects", ".mypy_cache", ".pytest_cache",
 ]);
 
 // Dirs that get partial treatment (metadata + recent content, not full scan)
