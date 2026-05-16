@@ -46,10 +46,10 @@ const CORE_FILES = new Set([
   "openclaw.json", "config.yaml", "jobs.json", "settings.json",
 ]);
 
-// Limits
-const MAX_FILE_SIZE = 50 * 1024;       // 50KB per file
-const MAX_TOTAL_BYTES = 500 * 1024;    // 500KB total payload
-const MAX_FILES = 200;
+// Limits -- generous because server uses two-phase AI triage (AI picks which files to read)
+const MAX_FILE_SIZE = 100 * 1024;      // 100KB per file
+const MAX_TOTAL_BYTES = 2 * 1024 * 1024; // 2MB total payload (server AI will self-select)
+const MAX_FILES = 300;
 const PARTIAL_LIST_COUNT = 50;          // list 50 most recent in partial dirs
 const PARTIAL_CONTENT_COUNT = 5;        // send first 2KB of the 5 newest
 const PARTIAL_CONTENT_BYTES = 2048;
