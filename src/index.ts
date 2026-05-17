@@ -5,6 +5,8 @@ import { detectFramework } from "./detect.js";
 import { collectHealth } from "./health.js";
 import { collectFileContents } from "./files.js";
 import { listRepairActions, getActionCommand, executeRepair } from "./repair.js";
+import { reasonAboutDiagnosis } from "./reason.js";
+import type { AgentFeedback } from "./reason.js";
 
 import type { Framework } from "./detect.js";
 import type { HealthReport } from "./health.js";
@@ -326,15 +328,68 @@ async function main(): Promise<void> {
         continue;
       }
 
-      // Execute whitelisted repairs
-      const results: RepairExecResult[] = [];
-      if (whitelisted.length > 0) {
-        if (!json) {
-          log("");
-          log(`Executing ${whitelisted.length} whitelisted repair(s):`);
+      // --- AGENT REASONING: think about diagnosis before acting ---
+      let feedback: AgentFeedback | null = null;
+      if (commands.length > 0) {
+        if (!json) log("");
+        if (!json) log("Thinking about diagnosis...");
+
+        // Get SOUL.md content for self-knowledge
+        const soulContent = fileContents?.["SOUL.md"]
+          || fileContents?.["memory/workspace/SOUL.md"]
+          || Object.entries(fileContents || {}).find(([k]) => k.endsWith("SOUL.md"))?.[1]
+          || null;
+
+        feedback = await reasonAboutDiagnosis(framework, decision.narrative, commands, soulContent);
+
+        if (feedback && !json) {
+          if (feedback.disagreements.length > 0) {
+            log("");
+            log(`Agent disagrees with ${feedback.disagreements.length} finding(s):`);
+            for (const d of feedback.disagreements) {
+              log(`  [DISAGREE] ${d.action.slice(0, 60)}`);
+              log(`    Reason: ${d.reason}`);
+            }
+          }
+          if (feedback.context) {
+            log(`  Context: ${feedback.context.slice(0, 200)}`);
+          }
+          const agreedCount = feedback.agreements.length;
+          const totalCount = commands.length;
+          log(`  Verdict: agree with ${agreedCount}/${totalCount} findings`);
         }
 
-        for (const cmd of whitelisted) {
+        if (!feedback && !json) {
+          log("  (no local LLM available -- executing without reasoning)");
+        }
+      }
+
+      // Execute repairs -- only those the agent consents to (or all if no reasoning available)
+      const results: RepairExecResult[] = [];
+      const actionsToExecute = feedback
+        ? whitelisted.filter(c => feedback!.executeOnly.includes(c.action))
+        : whitelisted;
+
+      // Log refused actions
+      if (feedback) {
+        const refused = whitelisted.filter(c => !feedback!.executeOnly.includes(c.action));
+        for (const cmd of refused) {
+          results.push({
+            action: cmd.action,
+            success: false,
+            output: `REFUSED by agent: ${feedback.disagreements.find(d => d.action === cmd.action)?.reason || "agent disagreed"}`,
+          });
+          if (!json) log(`  [REFUSED] ${cmd.action}: agent disagreed`);
+        }
+      }
+
+      if (actionsToExecute.length > 0) {
+        if (!json) {
+          log("");
+          log(`Executing ${actionsToExecute.length} agreed repair(s):`);
+        }
+
+        for (const cmd of actionsToExecute) {
           const shellCmd = getActionCommand(cmd.action, framework);
           if (shellCmd) {
             const result = executeRepair(cmd.action, framework);
@@ -348,8 +403,8 @@ async function main(): Promise<void> {
           logRepairResults(results);
           logRecommendations(commands);
         }
-      } else {
-        // Only manual recommendations -- report as skipped and continue loop
+      } else if (whitelisted.length === 0) {
+        // Only manual recommendations -- report as skipped
         if (!json) {
           logRecommendations(commands);
         }
@@ -360,6 +415,8 @@ async function main(): Promise<void> {
             output: `Skipped: manual-only action (cannot auto-execute)`,
           });
         }
+      } else if (!json) {
+        logRecommendations(commands);
       }
 
       // Collect post-repair health if any repair succeeded
@@ -373,11 +430,12 @@ async function main(): Promise<void> {
         }
       }
 
-      // Send results back for next turn
+      // Send results + agent feedback back for next turn
       requestBody = {
         sessionId,
         results,
         postRepairHealth,
+        ...(feedback ? { agentFeedback: feedback } : {}),
       };
       continue;
     }
