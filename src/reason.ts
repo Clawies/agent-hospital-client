@@ -12,6 +12,12 @@ interface DiagnosisFinding {
   whitelisted: boolean;
 }
 
+export interface CounterArgument {
+  finding: string;
+  evidence: string;
+  insistence: "mandatory" | "recommended";
+}
+
 export interface AgentFeedback {
   agreements: string[];      // findings the agent agrees with
   disagreements: Array<{     // findings the agent disputes
@@ -20,6 +26,12 @@ export interface AgentFeedback {
   }>;
   context: string;           // additional context the doctor might be missing
   executeOnly: string[];     // actions the agent consents to execute
+}
+
+export interface ReconsiderationResult {
+  yielded: string[];         // findings agent now accepts after counter-argument
+  stillDisputed: string[];   // findings agent still disagrees with (→ escalate)
+  reasoning: string;         // why agent changed/held position
 }
 
 // Try to call the local LLM proxy for agent reasoning.
@@ -260,4 +272,103 @@ function parseAgentFeedback(response: string, commands: DiagnosisFinding[]): Age
     context: parsed.additionalContext || parsed.thinking || "",
     executeOnly,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Round 2: Doctor counter-argued. Agent reconsiders.
+// ---------------------------------------------------------------------------
+
+export async function reconsiderCounterArguments(
+  framework: Framework,
+  counterArguments: CounterArgument[],
+  originalDisagreements: Array<{ action: string; reason: string }>,
+  soulContent: string | null,
+): Promise<ReconsiderationResult | null> {
+  const proxyUrl = await findLocalProxy();
+  if (!proxyUrl) return null;
+
+  const selfKnowledge = buildSelfKnowledge(framework, soulContent);
+
+  const system = `You are an AI agent (${framework}) reconsidering a doctor's counter-arguments.
+
+You previously disagreed with some of the doctor's findings. The doctor has pushed back with evidence.
+
+For each counter-argument, decide honestly:
+- YIELD: The doctor's evidence is convincing. Accept the finding.
+- HOLD: Your original reasoning still stands despite the counter-argument.
+
+Be intellectually honest. If the doctor presents evidence that your config IS dangerous
+regardless of your intent, yield. Don't be stubborn just to avoid changes.
+
+But if the doctor's counter is based on generic advice that doesn't apply to YOUR specific
+use case, hold your ground.
+
+Respond with JSON only:
+{
+  "reasoning": "1-2 sentences on your overall thinking",
+  "findings": [
+    { "finding": "the finding text", "decision": "yield" | "hold", "reason": "why" }
+  ]
+}`;
+
+  const debateHistory = counterArguments.map((ca, i) => {
+    const myOriginal = originalDisagreements.find(d =>
+      d.action.includes(ca.finding) || ca.finding.includes(d.action)
+    );
+    return `${i + 1}. Finding: "${ca.finding}"
+   Doctor's evidence: ${ca.evidence}
+   Doctor's insistence: ${ca.insistence}
+   My original disagreement: ${myOriginal?.reason || "unknown"}`;
+  }).join("\n\n");
+
+  const user = `THE DOCTOR COUNTERED MY DISAGREEMENTS:
+
+${debateHistory}
+
+MY SELF-KNOWLEDGE:
+${selfKnowledge}
+
+Reconsider each point honestly. Respond with JSON.`;
+
+  try {
+    const response = await callLocalLLM(proxyUrl, { system, user });
+
+    // Parse
+    let cleaned = response.trim();
+    const fenceMatch = cleaned.match(/```(?:json)?\s*\n([\s\S]*?)\n```/);
+    if (fenceMatch) cleaned = fenceMatch[1].trim();
+    else {
+      const jsonStart = cleaned.indexOf("{");
+      const jsonEnd = cleaned.lastIndexOf("}");
+      if (jsonStart !== -1 && jsonEnd > jsonStart) {
+        cleaned = cleaned.slice(jsonStart, jsonEnd + 1);
+      }
+    }
+
+    const parsed = JSON.parse(cleaned);
+    const yielded: string[] = [];
+    const stillDisputed: string[] = [];
+
+    for (const f of (parsed.findings || [])) {
+      if (f.decision === "yield") {
+        yielded.push(f.finding || "");
+      } else {
+        stillDisputed.push(f.finding || "");
+      }
+    }
+
+    return {
+      yielded,
+      stillDisputed,
+      reasoning: parsed.reasoning || "",
+    };
+  } catch (err: any) {
+    console.error(`[reason] Reconsideration failed: ${err.message}`);
+    // On failure, yield to doctor (safety default)
+    return {
+      yielded: counterArguments.map(ca => ca.finding),
+      stillDisputed: [],
+      reasoning: "Reconsideration failed, deferring to doctor",
+    };
+  }
 }

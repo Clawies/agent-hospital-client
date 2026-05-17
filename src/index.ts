@@ -5,8 +5,8 @@ import { detectFramework } from "./detect.js";
 import { collectHealth } from "./health.js";
 import { collectFileContents } from "./files.js";
 import { listRepairActions, getActionCommand, executeRepair } from "./repair.js";
-import { reasonAboutDiagnosis } from "./reason.js";
-import type { AgentFeedback } from "./reason.js";
+import { reasonAboutDiagnosis, reconsiderCounterArguments } from "./reason.js";
+import type { AgentFeedback, ReconsiderationResult } from "./reason.js";
 
 import type { Framework } from "./detect.js";
 import type { HealthReport } from "./health.js";
@@ -14,6 +14,12 @@ import type { HealthReport } from "./health.js";
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
+
+interface CounterArgument {
+  finding: string;
+  evidence: string;
+  insistence: "mandatory" | "recommended";
+}
 
 interface HealingDecision {
   decision: "healed" | "escalate" | "more_repairs" | "recheck_health";
@@ -25,6 +31,7 @@ interface HealingDecision {
   }>;
   confidence: number;
   severity: string;
+  counterArguments?: CounterArgument[];
 }
 
 interface InitialHealResponse {
@@ -220,6 +227,7 @@ async function main(): Promise<void> {
   let sessionId: string | undefined;
   let turnCount = 0;
   const MAX_TURNS = 10;
+  let lastDisagreements: Array<{ action: string; reason: string }> = [];
 
   // Initial request payload
   let requestBody: any = {
@@ -316,6 +324,55 @@ async function main(): Promise<void> {
         logDoctor(decision.narrative || "Repairs prescribed.", decision.severity);
       }
 
+      // --- COUNTER-ARGUMENT HANDLING: doctor pushed back on our disagreements ---
+      if (decision.counterArguments && decision.counterArguments.length > 0 && lastDisagreements.length > 0) {
+        if (!json) {
+          log("");
+          log(`Doctor counter-argued ${decision.counterArguments.length} point(s):`);
+          for (const ca of decision.counterArguments) {
+            log(`  [${ca.insistence.toUpperCase()}] ${ca.finding.slice(0, 60)}`);
+            log(`    Evidence: ${ca.evidence.slice(0, 100)}`);
+          }
+          log("");
+          log("Reconsidering...");
+        }
+
+        const soulContent = fileContents?.["SOUL.md"]
+          || fileContents?.["memory/workspace/SOUL.md"]
+          || Object.entries(fileContents || {}).find(([k]) => k.endsWith("SOUL.md"))?.[1]
+          || null;
+
+        const reconsideration = await reconsiderCounterArguments(
+          framework,
+          decision.counterArguments,
+          lastDisagreements,
+          soulContent,
+        );
+
+        if (reconsideration && !json) {
+          if (reconsideration.yielded.length > 0) {
+            log(`  Yielded on ${reconsideration.yielded.length} point(s) -- doctor was right`);
+          }
+          if (reconsideration.stillDisputed.length > 0) {
+            log(`  Still disagree on ${reconsideration.stillDisputed.length} point(s) -- escalating those`);
+          }
+          if (reconsideration.reasoning) {
+            log(`  Reasoning: ${reconsideration.reasoning.slice(0, 150)}`);
+          }
+        }
+
+        // For mandatory counter-arguments where agent still holds, escalate
+        if (reconsideration?.stillDisputed && reconsideration.stillDisputed.length > 0) {
+          const mandatoryHolds = decision.counterArguments.filter(ca =>
+            ca.insistence === "mandatory" &&
+            reconsideration.stillDisputed.some(s => s.includes(ca.finding) || ca.finding.includes(s))
+          );
+          if (mandatoryHolds.length > 0 && !json) {
+            log(`  [STANDOFF] ${mandatoryHolds.length} mandatory finding(s) unresolved -- needs human decision`);
+          }
+        }
+      }
+
       if (whitelisted.length === 0 && manual.length === 0) {
         // No commands but doctor wants more -- recheck health
         if (!json) log("  Doctor requested fresh health data...");
@@ -361,6 +418,11 @@ async function main(): Promise<void> {
 
         if (!feedback && !json) {
           log("  (no local LLM available -- executing without reasoning)");
+        }
+
+        // Save disagreements for counter-argument handling in next turn
+        if (feedback) {
+          lastDisagreements = feedback.disagreements;
         }
       }
 
