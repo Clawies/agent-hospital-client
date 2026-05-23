@@ -1,6 +1,6 @@
 {
   "name": "@agent-hospital/client",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Zero-config health check and healing client for Agent Hospital",
   "type": "module",
   "main": "dist/index.js",

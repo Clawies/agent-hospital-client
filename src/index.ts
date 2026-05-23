@@ -6,6 +6,12 @@ import { collectHealth } from "./health.js";
 import { collectFileContents } from "./files.js";
 import { listRepairActions, getActionCommand, executeRepair } from "./repair.js";
 import { reasonAboutDiagnosis, reconsiderCounterArguments } from "./reason.js";
+import {
+  loadCredentials,
+  registerAndCache,
+  signJWT,
+  type StoredCredentials,
+} from "./credentials.js";
 import type { AgentFeedback, ReconsiderationResult } from "./reason.js";
 
 import type { Framework } from "./detect.js";
@@ -56,6 +62,8 @@ interface RepairExecResult {
 // Arg parsing (no commander)
 // ---------------------------------------------------------------------------
 
+const DEFAULT_HOSPITAL_URL = "https://api.agent-hospital.ai";
+
 function parseArgs(): { url: string; framework?: string; json: boolean } | null {
   const args = process.argv.slice(2);
 
@@ -83,9 +91,9 @@ function parseArgs(): { url: string; framework?: string; json: boolean } | null 
     }
   }
 
+  // Default to production hospital
   if (!url) {
-    printUsage();
-    return null;
+    url = DEFAULT_HOSPITAL_URL;
   }
 
   // Strip trailing slash
@@ -95,23 +103,24 @@ function parseArgs(): { url: string; framework?: string; json: boolean } | null 
 }
 
 function printUsage(): void {
-  console.error("Usage: agent-hospital-client heal <hospital-url> [--framework openclaw|hermes] [--json]");
+  console.error("Usage: agent-hospital-client heal [hospital-url] [--framework openclaw|hermes] [--json]");
   console.error("");
-  console.error("Example:");
-  console.error("  npx @agent-hospital/client heal https://hospital.example.com");
-  console.error("  npx @agent-hospital/client heal http://localhost:4200 --framework openclaw --json");
+  console.error("Examples:");
+  console.error("  npx @agent-hospital/client heal");
+  console.error("  npx @agent-hospital/client heal https://my-hospital.example.com");
+  console.error("  npx @agent-hospital/client heal --framework openclaw --json");
 }
 
 // ---------------------------------------------------------------------------
 // HTTP helpers (native fetch, Node 18+)
 // ---------------------------------------------------------------------------
 
-async function postJSON(url: string, body: unknown, apiKey?: string): Promise<any> {
+async function postJSON(url: string, body: unknown, jwtToken?: string): Promise<any> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   };
-  if (apiKey) {
-    headers["x-api-key"] = apiKey;
+  if (jwtToken) {
+    headers["Authorization"] = `Bearer ${jwtToken}`;
   }
 
   const jsonBody = JSON.stringify(body);
@@ -220,14 +229,36 @@ async function main(): Promise<void> {
   // Step 4: Get available repair actions
   const availableActions = listRepairActions(framework);
 
+  // Step 5: Resolve credentials (load cached or auto-register)
+  let creds: StoredCredentials;
+  const cachedCreds = loadCredentials(url);
+
+  if (cachedCreds) {
+    if (!json) log("Using cached credentials.");
+    creds = cachedCreds;
+  } else {
+    if (!json) log("First run: registering with Agent Hospital...");
+    try {
+      creds = await registerAndCache(url, framework, os.hostname(), json);
+      if (!json) log("Registered. Credentials saved to ~/.agent-hospital/credentials.json");
+    } catch (err: any) {
+      if (json) {
+        console.log(JSON.stringify({ error: "registration_failed", message: err.message }));
+      } else {
+        log(`Registration failed: ${err.message}`);
+      }
+      process.exit(1);
+    }
+  }
+
   if (!json) log("Sending to hospital...");
 
-  // Step 5: Healing loop
-  let apiKey: string | undefined;
+  // Step 6: Healing loop
   let sessionId: string | undefined;
   let turnCount = 0;
   const MAX_TURNS = 10;
   let lastDisagreements: Array<{ action: string; reason: string }> = [];
+  let hasReregistered = false;
 
   // Initial request payload
   let requestBody: any = {
@@ -251,16 +282,36 @@ async function main(): Promise<void> {
 
     let decision: HealingDecision;
     try {
+      // Sign a fresh JWT for this request (60s TTL)
+      const jwt = signJWT(creds.fingerprint, creds.privateKeyJwk);
+
       if (turnCount === 1) {
-        const resp: InitialHealResponse = await postJSON(`${url}/api/v1/heal`, requestBody, apiKey);
-        if (resp.apiKey && !apiKey) apiKey = resp.apiKey;
+        const resp: InitialHealResponse = await postJSON(`${url}/api/v1/heal`, requestBody, jwt);
         if (resp.sessionId) sessionId = resp.sessionId;
         decision = resp.decision;
       } else {
-        const resp: ResultsResponse = await postJSON(`${url}/api/v1/heal/results`, requestBody, apiKey);
+        const resp: ResultsResponse = await postJSON(`${url}/api/v1/heal/results`, requestBody, jwt);
         decision = resp.decision;
       }
     } catch (err: any) {
+      // Agent was deleted on the server -- re-register once and retry
+      if (
+        turnCount === 1 &&
+        !hasReregistered &&
+        err.message.includes("unknown agent fingerprint")
+      ) {
+        hasReregistered = true;
+        if (!json) log("Agent not recognized (may have been deleted). Re-registering...");
+        try {
+          creds = await registerAndCache(url, framework, os.hostname(), json);
+          if (!json) log("Re-registered. Retrying...");
+          turnCount = 0;
+          continue;
+        } catch {
+          // fall through to normal error handling
+        }
+      }
+
       if (json) {
         console.log(JSON.stringify({ error: "server_request_failed", turn: turnCount, message: err.message }));
       } else {
